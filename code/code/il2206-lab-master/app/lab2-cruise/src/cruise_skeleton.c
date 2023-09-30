@@ -25,7 +25,8 @@
 #include "sys/alt_irq.h"
 #include "sys/alt_alarm.h"
 
-#define DEBUG 1
+#define DEBUG 0
+#define VEHICLE_PRINT 0 //whether print vehicle info or not.
 
 #define HW_TIMER_PERIOD 100 /* 100ms */
 
@@ -45,7 +46,7 @@
 #define LED_RED_1 0x00000002 // Top Gear
 
 #define LED_GREEN_0 0x0001 // Cruise Control activated
-#define LED_GREEN_2 0x0002 // Cruise Control Button
+#define LED_GREEN_2 0x0004 // Cruise Control Button   rivised: LED_GREEN_2 is 0x0004 not 0x0002
 #define LED_GREEN_4 0x0010 // Brake Pedal
 #define LED_GREEN_6 0x0040 // Gas Pedal
 
@@ -58,17 +59,24 @@
 OS_STK StartTask_Stack[TASK_STACKSIZE]; 
 OS_STK ControlTask_Stack[TASK_STACKSIZE]; 
 OS_STK VehicleTask_Stack[TASK_STACKSIZE];
+OS_STK SwitchIOTask_Stack[TASK_STACKSIZE];
+OS_STK ButtonIOTask_Stack[TASK_STACKSIZE];
 
 // Task Priorities
 
 #define STARTTASK_PRIO     5
 #define VEHICLETASK_PRIO  10
 #define CONTROLTASK_PRIO  12
+#define SwitchIOTask_PRIO 15
+#define ButtonIOTask_PRIO 16
+
 
 // Task Periods
 
 #define CONTROL_PERIOD  300
 #define VEHICLE_PERIOD  300
+#define SWITCHIO_PERIOD 300
+#define BUTTONIO_PERIOD 300
 
 /*
  * Definition of Kernel Objects 
@@ -81,24 +89,46 @@ OS_EVENT *Mbox_Brake;
 OS_EVENT *Mbox_Engine;
 
 // Semaphores
-OS_EVENT *Task1TmrSem;
-OS_EVENT *Task2TmrSem;
+OS_EVENT *CONTROLTmrSem;
+OS_EVENT *VEHICLETmrSem;
+OS_EVENT *SwitchIOSem;
+OS_EVENT *ButtonIOSem;
 
 // SW-Timer
-OS_TMR *Task1Tmr;
-OS_TMR *Task2Tmr;
+OS_TMR *CONTROLTmr;
+OS_TMR *VEHICLETmr;
+OS_TMR *SWITCHIOTmr;
+OS_TMR *BUTTONIOTmr;
 
 
 /* Timer Callback Functions*/
-void Task1TmrCallback(void *ptmr, void *callback_arg){
-
+void CONTROLTmrCallback(void *ptmr, void *callback_arg){
+  OSSemPost(CONTROLTmrSem);
+  if(DEBUG){
+  printf("OSSemPost(CONTROLSem);\n");
+  }
 }
 
-void Task2TmrCallback(void *ptmr, void *callback_arg){
-  
+void VEHICLETmrCallback(void *ptmr, void *callback_arg){
+  OSSemPost(VEHICLETmrSem);
+  if(DEBUG){
+  printf("OSSemPost(VEHICLESem);\n");
+  }
 }
 
+void SWITCHIOTmrCallback(void *ptmr, void *callback_arg){
+  OSSemPost(SwitchIOSem);
+  if(DEBUG){
+  printf("OSSemPost(SWITCHIOSem);\n");
+  }
+}
 
+void BUTTONIOTmrCallback(void *ptmr, void *callback_arg){
+  OSSemPost(ButtonIOSem);
+  if(DEBUG){
+  printf("OSSemPost(BUTTONIOSem);\n");
+  }
+}
 
 /*
  * Types
@@ -117,12 +147,13 @@ INT32U led_red = 0;   // Red LEDs
 /*
  * Helper functions
  */
-
+// capture buttons
 int buttons_pressed(void)
 {
   return ~IORD_ALTERA_AVALON_PIO_DATA(D2_PIO_KEYS4_BASE);    
 }
 
+// capture switches
 int switches_pressed(void)
 {
   return IORD_ALTERA_AVALON_PIO_DATA(DE2_PIO_TOGGLES18_BASE);    
@@ -236,7 +267,8 @@ void VehicleTask(void* pdata)
   {
     err = OSMboxPost(Mbox_Velocity, (void *) &velocity);
 
-    OSTimeDlyHMSM(0,0,0,VEHICLE_PERIOD); 
+    OSSemPend(VEHICLETmrSem, 0, &err);
+    // OSTimeDlyHMSM(0,0,0,VEHICLE_PERIOD); 
 
     /* Non-blocking read of mailbox: 
        - message in mailbox: update throttle
@@ -283,10 +315,12 @@ void VehicleTask(void* pdata)
     else 
       acceleration = - brake_factor*velocity;
 
+    if(VEHICLE_PRINT){
     printf("Position: %d m\n", position);
     printf("Velocity: %d m/s\n", velocity);
     printf("Accell: %d m/s2\n", acceleration);
     printf("Throttle: %d V\n", *throttle);
+    }
 
     position = position + velocity * VEHICLE_PERIOD / 1000;
     velocity = velocity  + acceleration * VEHICLE_PERIOD / 1000.0;
@@ -318,6 +352,7 @@ void ControlTask(void* pdata)
 
   while(1)
   {
+    
     msg = OSMboxPend(Mbox_Velocity, 0, &err);
     current_velocity = (INT16S*) msg;
 
@@ -334,10 +369,100 @@ void ControlTask(void* pdata)
 
     err = OSMboxPost(Mbox_Throttle, (void *) &throttle);
 
-    OSTimeDlyHMSM(0,0,0, CONTROL_PERIOD);
+    OSSemPend(CONTROLTmr, 0, &err);
+    // OSTimeDlyHMSM(0,0,0, CONTROL_PERIOD);
   }
 }
 
+/* SwitchIO task: create the signals ENGINE and TOP_GEAR
+    red LEDs: active
+    ENGINE:   SW0   LEDR0
+    TOP_GEAR: SW1   LEDR1 */
+void SwitchIOTask(void* pdata){
+  int SwitchValue;
+  INT8U err;
+
+  while (1)
+  {
+    // read switch value:
+    SwitchValue = switches_pressed();
+    
+    switch (SwitchValue)
+    {
+    case ENGINE_FLAG:
+      IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_0);
+      if(DEBUG){
+        printf("ENGINE:on, LEDR0:on\n");
+      }
+      break;
+
+    case TOP_GEAR_FLAG:
+      IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_1);
+      if(DEBUG){
+        printf("TOP_GEAR:on, LEDR1:on\n");
+      }
+      break;
+    
+    default:
+    if(DEBUG){
+        printf("no switch is pressed! \n");
+      }
+      break;
+    }
+    OSSemPend(SwitchIOSem, 0, &err);
+  }
+
+}
+
+/* ButtonIO task: create the signals CRUISE_CONTROL, GAS_PEDAL and BRAKE_PEDAL
+   green LEDs: active
+   CRUISE_CONTROL:   KEY1   LEDG2
+   BRAKE_PEDAL:      KEY2   LEDG4 
+   GAS_PEDAL:        KEY3   LEDG6*/
+void ButtonIOTask(void* pdata){
+  int ButtonValue;
+  int ButtonValue2;
+  INT8U err;
+
+  while (1)
+  {
+    // read button value:
+    ButtonValue = buttons_pressed();
+    ButtonValue = (ButtonValue) & 0x0f;  // consist the type 
+    
+    switch (ButtonValue)
+    {
+    case CRUISE_CONTROL_FLAG:
+      IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_GREENLED9_BASE, LED_GREEN_2);
+      // if(DEBUG){
+        printf("CRUISE_CONTROL:on, LEDG2:on\n");
+      // }
+      break;
+
+    case BRAKE_PEDAL_FLAG:
+      IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_GREENLED9_BASE, LED_GREEN_4); 
+      // if(DEBUG){
+        printf("BRAKE_PEDAL:on, LEDG4:on\n");
+      // }
+      break;
+
+    case GAS_PEDAL_FLAG:
+    IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_GREENLED9_BASE, LED_GREEN_6); 
+    // if(DEBUG){
+        printf("GAS_PEDAL:on, LEDG6:on\n");
+      // }
+      break;
+    
+    default:
+    // if(DEBUG){
+        // printf("no button is pressed! \n");
+        printf("%x\n",ButtonValue);
+      // }
+      break;
+    }
+    OSSemPend(ButtonIOSem, 0, &err);
+  }
+}
 /* 
  * The task 'StartTask' creates all other tasks kernel objects and
  * deletes itself afterwards.
@@ -369,25 +494,96 @@ void StartTask(void* pdata)
    * Create and start Software Timer 
    */
 
-  Task1Tmr = OSTmrCreate(0, //initial delay
+  CONTROLTmr = OSTmrCreate(0, //initial delay
                         CONTROL_PERIOD/HW_TIMER_PERIOD, // period
                         OS_TMR_OPT_PERIODIC, // automatically reload itself
-                        Task1TmrCallback, // callback function
-                        (void *)0
-                        "Tsak1Tmr",
+                        CONTROLTmrCallback, // callback function
+                        (void *)0,
+                        "CONTROLTmr",
                         &err);
+  if(DEBUG){
+    if(err == OS_ERR_NONE){ // create successfully
+        printf("CONTROLTmr created \n");
+    }
+  }
   
-  Task2Tmr = OSTmrCreate(0, //initial delay
+  VEHICLETmr = OSTmrCreate(0, //initial delay
                         VEHICLE_PERIOD/HW_TIMER_PERIOD, // period
                         OS_TMR_OPT_PERIODIC, // automatically reload itself
-                        Task2TmrCallback, // callback function
-                        (void *)0
-                        "Tsak2Tmr",
+                        VEHICLETmrCallback, // callback function
+                        (void *)0,
+                        "VEHICLETmr",
                         &err);
+  if(DEBUG){
+    if(err == OS_ERR_NONE){ // create successfully
+        printf("VEHICLETmr created \n");
+    }
+  }
+
+   SWITCHIOTmr = OSTmrCreate(0, //initial delay
+                        SWITCHIO_PERIOD/HW_TIMER_PERIOD, // period
+                        OS_TMR_OPT_PERIODIC, // automatically reload itself
+                        SWITCHIOTmrCallback, // callback function
+                        (void *)0,
+                        "SWITCHIOTmr",
+                        &err);
+  if(DEBUG){
+    if(err == OS_ERR_NONE){ // create successfully
+        printf("CONTROLTmr created \n");
+    }
+  }
+  
+  BUTTONIOTmr = OSTmrCreate(0, //initial delay
+                        BUTTONIO_PERIOD/HW_TIMER_PERIOD, // period
+                        OS_TMR_OPT_PERIODIC, // automatically reload itself
+                        BUTTONIOTmrCallback, // callback function
+                        (void *)0,
+                        "BUTTONIOTmr",
+                        &err);
+  if(DEBUG){
+    if(err == OS_ERR_NONE){ // create successfully
+        printf("BUTTONIOTmr created \n");
+    }
+  }
+
+
+  // Start timers
+  OSTmrStart(CONTROLTmr, &err);
+  if (DEBUG) {
+    if (err == OS_ERR_NONE) { //start successful
+      printf("CONTROLTmr started\n");
+    }
+   }
+
+   OSTmrStart(VEHICLETmr, &err);
+  if (DEBUG) {
+    if (err == OS_ERR_NONE) { //start successful
+      printf("VEHICLETmr started\n");
+    }
+   }
+
+  OSTmrStart(SWITCHIOTmr, &err);
+  if (DEBUG) {
+    if (err == OS_ERR_NONE) { //start successful
+      printf("SWITCHIOTmr started\n");
+    }
+   }
+
+   OSTmrStart(BUTTONIOTmr, &err);
+  if (DEBUG) {
+    if (err == OS_ERR_NONE) { //start successful
+      printf("BUTTONIOTmr started\n");
+    }
+   }
 
   /*
    * Creation of Kernel Objects
    */
+
+  CONTROLTmrSem = OSSemCreate(0);
+  VEHICLETmrSem = OSSemCreate(0);
+  SwitchIOSem = OSSemCreate(0);
+  ButtonIOSem = OSSemCreate(0);
 
   // Mailboxes
   Mbox_Throttle = OSMboxCreate((void*) 0); /* Empty Mailbox - Throttle */
@@ -428,6 +624,32 @@ void StartTask(void* pdata)
       VEHICLETASK_PRIO,
       VEHICLETASK_PRIO,
       (void *)&VehicleTask_Stack[0],
+      TASK_STACKSIZE,
+      (void *) 0,
+      OS_TASK_OPT_STK_CHK);
+  
+  err = OSTaskCreateExt(
+      SwitchIOTask, // Pointer to task code
+      NULL,        // Pointer to argument that is
+      // passed to task
+      &SwitchIOTask_Stack[TASK_STACKSIZE-1], // Pointer to top
+      // of task stack
+      SwitchIOTask_PRIO,
+      SwitchIOTask_PRIO,
+      (void *)&SwitchIOTask_Stack[0],
+      TASK_STACKSIZE,
+      (void *) 0,
+      OS_TASK_OPT_STK_CHK);
+
+  err = OSTaskCreateExt(
+      ButtonIOTask, // Pointer to task code
+      NULL,        // Pointer to argument that is
+      // passed to task
+      &ButtonIOTask_Stack[TASK_STACKSIZE-1], // Pointer to top
+      // of task stack
+      ButtonIOTask_PRIO,
+      ButtonIOTask_PRIO,
+      (void *)&ButtonIOTask_Stack[0],
       TASK_STACKSIZE,
       (void *) 0,
       OS_TASK_OPT_STK_CHK);
