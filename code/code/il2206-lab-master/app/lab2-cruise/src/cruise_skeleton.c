@@ -81,8 +81,24 @@ OS_EVENT *Mbox_Brake;
 OS_EVENT *Mbox_Engine;
 
 // Semaphores
+OS_EVENT *Task1TmrSem;
+OS_EVENT *Task2TmrSem;
 
 // SW-Timer
+OS_TMR *Task1Tmr;
+OS_TMR *Task2Tmr;
+
+
+/* Timer Callback Functions*/
+void Task1TmrCallback(void *ptmr, void *callback_arg){
+
+}
+
+void Task2TmrCallback(void *ptmr, void *callback_arg){
+  
+}
+
+
 
 /*
  * Types
@@ -352,6 +368,22 @@ void StartTask(void* pdata)
   /* 
    * Create and start Software Timer 
    */
+
+  Task1Tmr = OSTmrCreate(0, //initial delay
+                        CONTROL_PERIOD/HW_TIMER_PERIOD, // period
+                        OS_TMR_OPT_PERIODIC, // automatically reload itself
+                        Task1TmrCallback, // callback function
+                        (void *)0
+                        "Tsak1Tmr",
+                        &err);
+  
+  Task2Tmr = OSTmrCreate(0, //initial delay
+                        VEHICLE_PERIOD/HW_TIMER_PERIOD, // period
+                        OS_TMR_OPT_PERIODIC, // automatically reload itself
+                        Task2TmrCallback, // callback function
+                        (void *)0
+                        "Tsak2Tmr",
+                        &err);
 
   /*
    * Creation of Kernel Objects

@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include "includes.h"
 #include <string.h>
+#include "altera_avalon_pio_regs.h"
+#include "sys/alt_irq.h"
+#include "sys/alt_alarm.h"
+#include "system.h"
 
 #define DEBUG 0
 
