@@ -178,8 +178,8 @@
 
   - Engine：给信号启动，如果速度为0会关闭。
   - Cruise Control：当TOP_GEAR激活时，可以保持恒速，如果速度大于20，则GAS_PEDAL和BRAKE_PEDAL就不能激活。
-  - Gas Pedal: Cruise control未激活时，可以给车加速。
-  - Brake： Cruise control未激活时，可以给车减速。
+  - Gas Pedal: 可以给车加速，Cruise control变为未激活状态。
+  - Brake： 可以给车减速，Cruise control变为未激活状态。
   - Gear(HIGH/LOW): 有high和low两种状态，为high的时候可以激活恒速，为low的时候取消恒速状态。
 
   对应的输出显示为下：
@@ -214,9 +214,7 @@
 
 ##### 4.4 Control Law
 
-- 创建task ControlTask来满足限制要求
-
-- 刹车要在VehicleTask里并且要发送信息，而ControlTask发送油门量
+- 刹车要在VehicleTask里并且要发送信息，而ControlTask发送油门量，因为刹车要有任意时候disable 油门的作用。
 
 - 恒速下，速度至少为25时，速度偏离要为4，用LEDG0来表示恒速状态。
 

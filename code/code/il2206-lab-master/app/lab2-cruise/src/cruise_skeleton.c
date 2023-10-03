@@ -19,6 +19,8 @@
  *   staff.
  */
 #include <stdio.h>
+#include <stdbool.h>
+#include <math.h>
 #include "system.h"
 #include "includes.h"
 #include "altera_avalon_pio_regs.h"
@@ -27,9 +29,11 @@
 
 #define DEBUG 0
 #define VEHICLE_PRINT 0 //whether print vehicle info or not.
+#define MBOX_DEBUG 0
 
 #define HW_TIMER_PERIOD 100 /* 100ms */
 
+#define TURN_OFF 0x00
 /* Button Patterns */
 
 #define GAS_PEDAL_FLAG      0x08
@@ -39,6 +43,7 @@
 
 #define TOP_GEAR_FLAG       0x00000002
 #define ENGINE_FLAG         0x00000001
+#define TOP_GEAR_And_ENGINE_FLAG 0x00000003
 
 /* LED Patterns */
 
@@ -49,6 +54,28 @@
 #define LED_GREEN_2 0x0004 // Cruise Control Button   rivised: LED_GREEN_2 is 0x0004 not 0x0002
 #define LED_GREEN_4 0x0010 // Brake Pedal
 #define LED_GREEN_6 0x0040 // Gas Pedal
+
+#define LED_RED_12 0x1000     // [2000m, 2400m]
+#define LED_RED_13 0x2000     // [1600m, 2000m)
+#define LED_RED_14 0x4000     // [1200m, 1600m)
+#define LED_RED_15 0x8000     // [800m, 1200m)
+#define LED_RED_16 0x10000    // [400m, 800m)
+#define LED_RED_17 0x20000    // [0m, 400m)
+
+/*pid controler*/
+typedef struct 
+{
+  float kp;
+  float ki;
+  float kd;
+  float cur_error;
+  float cur_vel;
+  float ref_vel;
+  float output;
+  float error[2]; 
+  float output_max;
+}PID_t;
+
 
 /*
  * Definition of Tasks
@@ -83,10 +110,14 @@ OS_STK ButtonIOTask_Stack[TASK_STACKSIZE];
  */
 
 // Mailboxes
-OS_EVENT *Mbox_Throttle;
-OS_EVENT *Mbox_Velocity;
-OS_EVENT *Mbox_Brake;
-OS_EVENT *Mbox_Engine;
+OS_EVENT *Mbox_Throttle;  //control task -> vehicle task
+OS_EVENT *Mbox_Velocity;  //vehicle task -> control task; control task -> button task
+OS_EVENT *Mbox_Brake;     //button task -> vehicle task
+OS_EVENT *Mbox_Engine_to_vehicle;    //switch task -> vehicle task; 
+OS_EVENT *Mbox_Engine_to_control;    //switch task -> control task
+OS_EVENT *Mbox_Cruise;    //button task -> control task
+OS_EVENT *Mbox_Top_gear;  //switch task -> control task
+OS_EVENT *Mbox_Gas_pedel; //button task -> control task
 
 // Semaphores
 OS_EVENT *CONTROLTmrSem;
@@ -100,7 +131,30 @@ OS_TMR *VEHICLETmr;
 OS_TMR *SWITCHIOTmr;
 OS_TMR *BUTTONIOTmr;
 
+// pid controller init
+void PID_init(PID_t* pid){
+  pid->kp = 1.0;
+  pid->ki = 0.01;
+  pid->kd = 0.01;
+  pid->error[0] = 0;
+  pid->error[1] = 0;
+  pid->output_max = 20.0;
+}
 
+// PID control
+void PID_control(PID_t* pid, INT16S cur_velocity, INT16S ref_velocity){
+pid->cur_vel = cur_velocity;
+pid->ref_vel = ref_velocity;
+pid->cur_error = pid->ref_vel - pid->cur_vel;
+pid->output = pid->kp*(pid->cur_error - pid->error[1]) + pid->ki*pid->cur_error
++pid->kd * (pid->cur_error - 2 * pid->error[1] + pid->error[0]);
+pid->error[0] = pid->error[1];
+pid->error[1] = pid->cur_error;
+
+// set maxumum and minimum
+if(pid->output > pid->output_max) pid->output = pid->output_max;
+if(pid->output < -pid->output_max) pid->output = -pid->output_max;
+}
 /* Timer Callback Functions*/
 void CONTROLTmrCallback(void *ptmr, void *callback_arg){
   OSSemPost(CONTROLTmrSem);
@@ -134,6 +188,12 @@ void BUTTONIOTmrCallback(void *ptmr, void *callback_arg){
  * Types
  */
 enum active {on = 2, off = 1};
+
+// enum active ENGINE_status = off;
+// enum active TOP_GEAR_status = off;
+// enum active CRUISE_CONTROL_status = off;
+// enum active BRAKE_PEDAL_status = off;
+// enum active GAS_PEDAL_status = off;
 
 
 /*
@@ -220,8 +280,31 @@ void show_velocity_on_sevenseg(INT8S velocity){
  * shows the target velocity on the seven segment display (HEX5, HEX4)
  * when the cruise control is activated (0 otherwise)
  */
-void show_target_velocity(INT8U target_vel)
+void show_target_velocity(INT8S target_vel)
 {
+  int tmp = target_vel;
+  int out;
+  INT8U out_high = 0;
+  INT8U out_low = 0;
+  INT8U out_sign = 0;
+
+  if(velocity < 0){
+    out_sign = int2seven(10);
+    tmp *= -1;
+  }else{
+    out_sign = int2seven(0);
+  }
+
+  out_high = int2seven(tmp / 10);
+  out_low = int2seven(tmp - (tmp/10) * 10);
+
+  out = int2seven(0) << 21 |
+    out_sign << 14 |
+    out_high << 7  |
+    out_low;
+  
+  IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_HEX_HIGH28_BASE,out);
+
 }
 
 /*
@@ -235,6 +318,18 @@ void show_target_velocity(INT8U target_vel)
  */
 void show_position(INT16U position)
 {
+  if(position >= 0 && position < 400)
+  IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_17); // LEDR17 ON
+  else if (position >= 400 && position < 800)
+  IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_16); // LEDR16 ON
+  else if (position >= 800 && position < 1200)
+  IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_15); // LEDR15 ON
+  else if (position >= 1200 && position < 1600)
+  IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_14); // LEDR14 ON
+  else if (position >= 1600 && position < 2000)
+  IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_13); // LEDR13 ON
+  else if (position >= 2000 && position < 2400)
+  IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_12); // LEDR12 ON
 }
 
 /*
@@ -274,18 +369,36 @@ void VehicleTask(void* pdata)
        - message in mailbox: update throttle
        - no message:         use old throttle
        */
-    msg = OSMboxPend(Mbox_Throttle, 1, &err); 
-    if (err == OS_NO_ERR) 
-      throttle = (INT8U*) msg;
-    /* Same for the brake signal that bypass the control law */
-    msg = OSMboxPend(Mbox_Brake, 1, &err); 
-    if (err == OS_NO_ERR) 
-      brake_pedal = (enum active) msg;
-    /* Same for the engine signal that bypass the control law */
-    msg = OSMboxPend(Mbox_Engine, 1, &err); 
-    if (err == OS_NO_ERR) 
-      engine = (enum active) msg;
 
+    // from: control task
+    msg = OSMboxPend(Mbox_Throttle, 1, &err); 
+    if (err == OS_NO_ERR) {
+      throttle = (INT8U*) msg;
+      if(MBOX_DEBUG){
+        printf("Throttle_msg recieve! \n");
+    }
+    }
+
+    /* Same for the brake signal that bypass the control law
+    from buttonIOtask */
+    msg = OSMboxPend(Mbox_Brake, 1, &err); 
+    if (err == OS_NO_ERR) {
+      if(MBOX_DEBUG){
+        printf("brake_msg recieve! \n");
+    }
+      // brake_pedal = (enum active) msg;
+      brake_pedal = (enum active)(int*)msg;
+    }
+
+    /* Same for the engine signal that bypass the control law 
+    from switchIOtask*/
+    msg = OSMboxPend(Mbox_Engine_to_vehicle, 1, &err); 
+    if (err == OS_NO_ERR) {
+      if(MBOX_DEBUG){
+        printf("engine_msg recieve! \n");
+    }
+      engine = (enum active) msg;
+    }
 
     // vehichle cannot effort more than 80 units of throttle
     if (*throttle > 80) *throttle = 80;
@@ -327,7 +440,7 @@ void VehicleTask(void* pdata)
     // reset the position to the beginning of the track
     if(position > 2400)
       position = 0;
-
+    show_position(position);
     show_velocity_on_sevenseg((INT8S) velocity);
   }
 } 
@@ -340,21 +453,29 @@ void VehicleTask(void* pdata)
 void ControlTask(void* pdata)
 {
   INT8U err;
-  INT8U throttle = 40; /* Value between 0 and 80, which is interpreted as between 0.0V and 8.0V */
+  INT8U throttle = 0; /* Value between 0 and 80, which is interpreted as between 0.0V and 8.0V */
   void* msg;
-  INT16S* current_velocity;
+  INT16S* velocity_recv;
+  INT16S current_velocity;
+  INT16S target_velocity;
+  PID_t PID;
+  bool SET_Target = false;
 
-  enum active gas_pedal = off;
-  enum active top_gear = off;
-  enum active cruise_control = off; 
+  enum active ENGINE_status = off;
+  enum active TOP_GEAR_status = off;
+  enum active CRUISE_CONTROL_status = off;
+  enum active GAS_PEDAL_status = off;
 
   printf("Control Task created!\n");
+  PID_init();
 
   while(1)
   {
-    
-    msg = OSMboxPend(Mbox_Velocity, 0, &err);
-    current_velocity = (INT16S*) msg;
+    // get current_velocity from Mbox_Velocity
+    velocity_recv = (INT16S*)OSMboxPend(Mbox_Velocity, 0, &err);
+    current_velocity =  *velocity_recv;
+    // // post the current velocity into Mbox_Velocity for other task read
+    // err = OSMboxPost(Mbox_Velocity, (void *)&current_velocity);
 
     // Here you can use whatever technique or algorithm that you prefer to control
     // the velocity via the throttle. There are no right and wrong answer to this controller, so
@@ -366,11 +487,91 @@ void ControlTask(void* pdata)
     // ...
     //
     // If your control algorithm/technique needs them in order to function. 
+    
+     /* Non-blocking read of mailbox: */
+    // from: control task
 
+    /* engine signal from switchIOtask */
+    msg = OSMboxPend(Mbox_Engine_to_control, 1, &err); 
+    if (err == OS_NO_ERR) {
+      if(MBOX_DEBUG){
+        printf("engine_msg recieve! \n");
+    }
+      ENGINE_status = (enum active)(int*)msg;
+    }
+
+    //* cruise signal from buttonIOtask */
+    msg = OSMboxPend(Mbox_Cruise, 1, &err); 
+    if (err == OS_NO_ERR) {
+      if(MBOX_DEBUG){
+        printf("cruise_msg recieve! \n");
+    }
+      CRUISE_CONTROL_status = (enum active) msg;
+    }
+    
+    //* gas_pedel signal from buttonIOtask */
+    msg = OSMboxPend(Mbox_Gas_pedel, 1, &err); 
+    if (err == OS_NO_ERR) {
+      if(MBOX_DEBUG){
+        printf("gas_pedel_msg recieve! \n");
+    }
+      GAS_PEDAL_status = (enum active) msg;
+    }
+
+    //* top_gear signal from switchIOtask */
+    msg = OSMboxPend(Mbox_Top_gear, 1, &err); 
+    if (err == OS_NO_ERR){
+      if(MBOX_DEBUG){
+        printf("Top_gear_msg recieve! \n");
+    }
+      TOP_GEAR_status = (enum active) msg;
+    }
+
+    if(ENGINE_status == on){
+      // speed up
+      throttle = 20; // engine power
+      if(GAS_PEDAL_status == on){
+        throttle = 40;
+      }
+
+      // cruise control
+      if(TOP_GEAR_status == on)
+      {
+        if(CRUISE_CONTROL_status == on && current_velocity>=25)
+        {
+          IOADDR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_GREEN_0);
+            if(DEBUG) printf("cuise control active!, LEDG0: on\n");
+            if(!SET_Target) { //set the target velocity
+              target_velocity = current_velocity;
+              SET_Target = true;
+            }
+            show_target_velocity((INT8S)target_velocity);
+            PID_control(PID, current_velocity, target_velocity);
+            throttle = (INT8U)(throttle + (INT8S)PID.output);
+
+            if(target_velocity - current_velocity >4 
+            || current_velocity - target_velocity >4) CRUISE_CONTROL_status == off;
+        
+        } 
+
+        else
+        { // cruise control deavtivate 
+            CRUISE_CONTROL_status = off;
+            show_target_velocity(0);
+        }
+      }
+      else
+      { // The cruise control is deactivated, when the gear position is moved to low.
+          CRUISE_CONTROL_status = off;
+      }
+
+      if(CRUISE_CONTROL_status == off) SET_Target = false; //reset the flag
+    }
+
+    printf("throttle value is: ")
     err = OSMboxPost(Mbox_Throttle, (void *) &throttle);
-
     OSSemPend(CONTROLTmr, 0, &err);
-    // OSTimeDlyHMSM(0,0,0, CONTROL_PERIOD);
+    // OSTimeDlyHMSM(0,0,0, CONTROL_PERIOD);  
   }
 }
 
@@ -381,12 +582,13 @@ void ControlTask(void* pdata)
 void SwitchIOTask(void* pdata){
   int SwitchValue;
   INT8U err;
+enum active ENGINE_status = off;
+enum active TOP_GEAR_status = off;
 
   while (1)
   {
     // read switch value:
     SwitchValue = switches_pressed();
-    
     switch (SwitchValue)
     {
     case ENGINE_FLAG:
@@ -394,6 +596,8 @@ void SwitchIOTask(void* pdata){
       if(DEBUG){
         printf("ENGINE:on, LEDR0:on\n");
       }
+      ENGINE_status = on;
+      
       break;
 
     case TOP_GEAR_FLAG:
@@ -401,14 +605,50 @@ void SwitchIOTask(void* pdata){
       if(DEBUG){
         printf("TOP_GEAR:on, LEDR1:on\n");
       }
+      TOP_GEAR_status = on;
       break;
-    
+
+    case TOP_GEAR_And_ENGINE_FLAG:
+      IOADDR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE, LED_RED_0+LED_RED_1);
+     if(DEBUG){
+        printf("ENGINE:on, LEDR0:on \t");
+        printf("TOP_GEAR:on, LEDR1:on\n");
+      }
+      ENGINE_status = on;
+      TOP_GEAR_status = on;
+      break;
+
     default:
+    ENGINE_status = off;
+    TOP_GEAR_status = off;
     if(DEBUG){
         printf("no switch is pressed! \n");
       }
+      IOADDR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE,TURN_OFF);
       break;
     }
+    // put engine signal into Mbox_engine_vehicle
+    err = OSMboxPost(Mbox_Engine_to_vehicle, (void*)&ENGINE_status);
+    if(MBOX_DEBUG){
+      if(err == OS_NO_ERR){ // successfully
+        printf("engine_to_vehicle_msg post! \n");
+    }
+    }
+    // put engine signal into Mbox_engine_control
+    err = OSMboxPost(Mbox_Engine_to_control, (void*)&ENGINE_status);
+    if(MBOX_DEBUG){
+      if(err == OS_NO_ERR){ // successfully
+        printf("engine__to_control_msg post! \n");
+    }
+    }
+    // put TOP_gear signal into Mbox_top_gear
+    err = OSMboxPost(Mbox_Top_gear, (void*)&TOP_GEAR_status);
+    if(MBOX_DEBUG){
+      if(err == OS_NO_ERR){ // successfully
+        printf("TOP_gear_msg post! \n");
+    }
+    }
+
     OSSemPend(SwitchIOSem, 0, &err);
   }
 
@@ -421,45 +661,87 @@ void SwitchIOTask(void* pdata){
    GAS_PEDAL:        KEY3   LEDG6*/
 void ButtonIOTask(void* pdata){
   int ButtonValue;
-  int ButtonValue2;
+  INT16S* velocity_recv;
+  INT16S current_velocity;
   INT8U err;
+  enum active CRUISE_CONTROL_status = off;
+  enum active BRAKE_PEDAL_status = off;
+  enum active GAS_PEDAL_status = off;
 
   while (1)
   {
+
+     // read the velocity form Mbox_velocity
+    velocity_recv = (INT16S*)OSMboxPend(Mbox_Velocity, 0, &err);
+    current_velocity = *velocity_recv;
+
     // read button value:
     ButtonValue = buttons_pressed();
-    ButtonValue = (ButtonValue) & 0x0f;  // consist the type 
+    ButtonValue = (ButtonValue) & 0x0f;  // because the upper 16-bit of ButtonValue is 0xffff
     
     switch (ButtonValue)
     {
     case CRUISE_CONTROL_FLAG:
+    // if(TOP_GEAR_status == on && current_velocity >= 25 
+    // && GAS_PEDAL_status == off && GAS_PEDAL_status == off){
       IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_GREENLED9_BASE, LED_GREEN_2);
-      // if(DEBUG){
+      if(DEBUG){
         printf("CRUISE_CONTROL:on, LEDG2:on\n");
-      // }
+      }
+      CRUISE_CONTROL_status = on;
+    // }
       break;
 
     case BRAKE_PEDAL_FLAG:
       IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_GREENLED9_BASE, LED_GREEN_4); 
-      // if(DEBUG){
+      if(DEBUG){
         printf("BRAKE_PEDAL:on, LEDG4:on\n");
-      // }
+      }
+      BRAKE_PEDAL_status = on;
+      CRUISE_CONTROL_status = off;
       break;
 
     case GAS_PEDAL_FLAG:
     IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_GREENLED9_BASE, LED_GREEN_6); 
-    // if(DEBUG){
+    if(DEBUG){
         printf("GAS_PEDAL:on, LEDG6:on\n");
-      // }
+      }
+      GAS_PEDAL_status = on;
+      CRUISE_CONTROL_status = off;
       break;
     
     default:
-    // if(DEBUG){
-        // printf("no button is pressed! \n");
-        printf("%x\n",ButtonValue);
-      // }
+    GAS_PEDAL_status = off;
+    BRAKE_PEDAL_status = off;
+    if(DEBUG){
+        printf("no button is pressed! \n");
+        // printf("%x\n",ButtonValue);
+      }
       break;
     }
+
+     // put cruise control signal into Mbox_Cruise
+    err = OSMboxPost(Mbox_Cruise, (void*)&CRUISE_CONTROL_status);
+    if(MBOX_DEBUG){
+      if(err == OS_NO_ERR){ // successfully
+        printf("cruise_msg post! \n");
+    }
+    }
+    // put TOP_gear signal into Mbox_Brake
+    err = OSMboxPost(Mbox_Brake, (void*)&BRAKE_PEDAL_status);
+    if(MBOX_DEBUG){
+      if(err == OS_NO_ERR){ // successfully
+        printf("brake_msg post! \n");
+    }
+    }
+    // put gas_padel signal into Mbox_Brake
+    err = OSMboxPost(Mbox_Gas_pedel, (void*)&GAS_PEDAL_status);
+    if(MBOX_DEBUG){
+      if(err == OS_NO_ERR){ // successfully
+        printf("gas_pedel_msg post! \n");
+    }
+    }
+
     OSSemPend(ButtonIOSem, 0, &err);
   }
 }
@@ -588,8 +870,12 @@ void StartTask(void* pdata)
   // Mailboxes
   Mbox_Throttle = OSMboxCreate((void*) 0); /* Empty Mailbox - Throttle */
   Mbox_Velocity = OSMboxCreate((void*) 0); /* Empty Mailbox - Velocity */
-  Mbox_Brake = OSMboxCreate((void*) 1); /* Empty Mailbox - Velocity */
-  Mbox_Engine = OSMboxCreate((void*) 1); /* Empty Mailbox - Engine */
+  Mbox_Brake = OSMboxCreate((void*) 0); /* Empty Mailbox - Velocity */
+  Mbox_Engine_to_vehicle = OSMboxCreate((void*) 0); /* Empty Mailbox - Engine */
+  Mbox_Engine_to_control = OSMboxCreate((void*) 0);
+  Mbox_Cruise = OSMboxCreate((void*) 0) /* Empty Mailbox - Cruise */
+  Mbox_Gas_pedel = OSMboxCreate((void*) 0); /* Empty Mailbox - gas_pedel */
+  Mbox_Top_gear = OSMboxCreate((void*) 0); /* Empty Mailbox - top_gear */
 
   /*
    * Create statistics task
