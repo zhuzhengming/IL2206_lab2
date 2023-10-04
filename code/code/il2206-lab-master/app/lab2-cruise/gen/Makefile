@@ -151,7 +151,7 @@ ASM_SRCS :=
 # using those SRC_DIR variables.
 SRC_DIR_01 := $(call adjust-path,../src)
 
-SDIR_C_SRCS += $(SRC_DIR_01)/cruise_skeleton.c
+SDIR_C_SRCS += $(SRC_DIR_01)/cruise.c
 SDIR_CXX_SRCS :=
 SDIR_ASM_SRCS :=
 

@@ -3,7 +3,7 @@
 # Machine generated for CPU 'nios2' in SOPC Builder design 'DE2_Nios2System'
 # SOPC Builder design path: ../../../hardware/DE2-pre-built/DE2_Nios2System.sopcinfo
 #
-# Generated: Sat Sep 30 19:35:25 UTC 2023
+# Generated: Tue Oct 03 20:56:45 UTC 2023
 
 # DO NOT MODIFY THIS FILE
 #
