@@ -227,6 +227,6 @@
 ##### 4.5 watchdog
 
 - 添加看门狗和helper：如果没有overload就显示OK并喂狗，否则警告。
-- 增加extra load,可调整，用SW4  到SW9，SW4是最低位，步长为2%,超过50为100%
+- 增加extra load,可调整，用SW4  到SW9，SW4是最低位，步长为2%, 超过50为100%，
 - ![image-20230925231328785](C:\Users\Administrator\AppData\Roaming\Typora\typora-user-images\image-20230925231328785.png)
 

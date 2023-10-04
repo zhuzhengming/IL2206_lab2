@@ -24,15 +24,16 @@
 #include "system.h"
 #include "includes.h"
 #include "altera_avalon_pio_regs.h"
+#include "altera_avalon_performance_counter.h"
 #include "sys/alt_irq.h"
 #include "sys/alt_alarm.h"
 
 #define DEBUG 0
-#define VEHICLE_PRINT 0 //whether print vehicle info or not.
+#define VEHICLE_PRINT 1 //whether print vehicle info or not.
 #define MBOX_DEBUG 0
 #define IO_DEBUG 0
 #define STATUS_DEBUG 0
-#define WATCHDOH_DEBUG 0
+#define WATCHDOH_DEBUG 1
 
 #define HW_TIMER_PERIOD 100 /* 100ms */
 
@@ -104,9 +105,9 @@ OS_STK Watchdog_Stack[TASK_STACKSIZE];
 #define SwitchIOTask_PRIO 8
 #define ButtonIOTask_PRIO 9
 
-#define OverloadTask_PRIO 12
+#define OverloadTask_PRIO  12
 #define ExtraloadTask_PRIO 11
-#define Watchdog           6
+#define Watchdog_PRIO      6
 
 // Task Periods
 
@@ -129,12 +130,14 @@ OS_EVENT *Mbox_Engine_to_control;    //switch task -> control task
 OS_EVENT *Mbox_Cruise;    //button task -> control task
 OS_EVENT *Mbox_Top_gear;  //switch task -> control task
 OS_EVENT *Mbox_Gas_pedel; //button task -> control task
+OS_EVENT *Mbox_WatchDog; // overloadDetection Task -> WatchDog Task
 
 // Semaphores
 OS_EVENT *CONTROLTmrSem;
 OS_EVENT *VEHICLETmrSem;
 OS_EVENT *SwitchIOSem;
 OS_EVENT *ButtonIOSem;
+
 OS_EVENT *OverloadDetectionSem;
 OS_EVENT *WatchdogSem;
 OS_EVENT *ExtraLoadSem;
@@ -205,13 +208,17 @@ void BUTTONIOTmrCallback(void *ptmr, void *callback_arg){
   }
 }
 
-// void OverloadTmrCallbask(void *ptmr, void *callback_arg){
+void OverloadTmrCallbask(void *ptmr, void *callback_arg){
 
-// }
+OSSemPost(WatchdogSem);
+OSSemPost(ExtraLoadSem);
+OSSemPost(OverloadDetectionSem);
+}
 /*
  * Types
  */
 enum active {on = 2, off = 1};
+enum watchdog {feeddog = 2, wait = 1};
 
 /*
  * Global variables
@@ -448,9 +455,10 @@ void VehicleTask(void* pdata)
     printf("Velocity: %d m/s\n", velocity);
     printf("Accell: %d m/s2\n", acceleration);
     printf("Throttle: %d V\n", *throttle);
+    printf("\n");
     }
     if(STATUS_DEBUG)
-    printf("velocity: %d \t engine: %d \t brake: %d \n",velocity, engine, brake_pedal);
+    printf("engine: %d \t brake: %d \n", engine, brake_pedal);
     position = position + velocity * VEHICLE_PERIOD / 1000;
     velocity = velocity  + acceleration * VEHICLE_PERIOD / 1000.0;
     // reset the position to the beginning of the track
@@ -568,7 +576,6 @@ void ControlTask(void* pdata)
             show_target_velocity((INT8S)target_velocity);
             PID_control(&PID, current_velocity, target_velocity);
             throttle = (INT8U)(throttle + PID.output);
-            printf("output: %d \n", PID.output);
 
             if(target_velocity - current_velocity >4 
             || current_velocity - target_velocity >4) CRUISE_CONTROL_status == off;
@@ -618,6 +625,7 @@ void SwitchIOTask(void* pdata){
   {
     // read switch value:
     SwitchValue = switches_pressed();
+    SwitchValue = SwitchValue & 0xf;
     switch (SwitchValue)
     {
     case ENGINE_FLAG:
@@ -773,6 +781,92 @@ void ButtonIOTask(void* pdata){
     OSSemPend(ButtonIOSem, 0, &err);
   }
 }
+
+void WatchDogTask(void* pdata){
+INT8U err;
+void* msg;
+enum watchdog Watchdog_status = feeddog;
+
+  printf("Watchdog created \n");
+
+  while (1)
+  {
+   
+     /* Non-blocking read of mailbox: */
+    msg = OSMboxPend(Mbox_WatchDog, 1, &err); 
+    if (err == OS_NO_ERR) {
+      // if(WATCHDOH_DEBUG) printf("watch_dog_msg recieve! \n");
+      Watchdog_status = *(enum active*)msg;
+    }
+
+    if(Watchdog_status == wait){
+      printf("warning: overload! \n");
+      printf("\n");
+    }
+    else{
+      printf("System works well! \n");
+      printf("\n");
+      Watchdog_status = wait;
+    }
+
+    OSSemPend(WatchdogSem, 0, &err);
+  }
+
+}
+
+void OverloadDetectionTask(void* pdata){
+INT8U err;
+enum watchdog Watchdog_status = wait;
+
+  printf("OverloadDetection created \n");
+
+  while (1)
+  {
+    Watchdog_status = feeddog;
+    err = OSMboxPost(Mbox_WatchDog, (void*)&Watchdog_status);
+    // if(WATCHDOH_DEBUG) printf("watch_dog_msg send! \n");
+
+    OSSemPend(OverloadDetectionSem, 0, &err);
+  }
+}
+
+void ExtraLoadTask(void* pdata){
+INT8U err;
+int SwitchValue;
+int utilization;
+INT32U start_time;
+INT32U cur_time;
+INT32U duration;
+float ratio;
+INT16U runtime;
+  printf("ExtraLoad created \n");
+
+  while (1)
+  {
+    SwitchValue = switches_pressed();
+    // 0x3f0 : 001111110000
+    utilization = (int)(SwitchValue & 0x3f0) >> 4;
+    if(utilization > 50) utilization = 50;
+    utilization = 2 * utilization;
+    ratio = (float)(utilization/ 100.0);
+
+    // add extra load acoording to utilization
+    runtime = (INT16U)OVERLOAD_PERIOD * ratio;
+
+    start_time = OSTimeGet(); // the current value of the system clock
+    do{
+        cur_time = OSTimeGet();
+        duration = cur_time - start_time;
+    }while(duration < runtime);
+
+    if(WATCHDOH_DEBUG){
+      printf("utilization value: %d %% \n", utilization);
+      printf("runtime : %d ms\n", runtime);
+    }
+
+    OSSemPend(ExtraLoadSem, 0, &err);
+  }
+}
 /* 
  * The task 'StartTask' creates all other tasks kernel objects and
  * deletes itself afterwards.
@@ -856,6 +950,19 @@ void StartTask(void* pdata)
     }
   }
 
+  OverloadTmr = OSTmrCreate(0, //initial delay
+                        OVERLOAD_PERIOD/HW_TIMER_PERIOD, // period
+                        OS_TMR_OPT_PERIODIC, // automatically reload itself
+                        OverloadTmrCallbask, // callback function
+                        (void *)0,
+                        "OverloadTmr",
+                        &err);
+  if(DEBUG){
+    if(err == OS_ERR_NONE){ // create successfully
+        printf("OverloadTmr created \n");
+    }
+  }
+
 
   // Start timers
   OSTmrStart(CONTROLTmr, &err);
@@ -865,7 +972,7 @@ void StartTask(void* pdata)
     }
    }
 
-   OSTmrStart(VEHICLETmr, &err);
+  OSTmrStart(VEHICLETmr, &err);
   if (DEBUG) {
     if (err == OS_ERR_NONE) { //start successful
       printf("VEHICLETmr started\n");
@@ -879,12 +986,20 @@ void StartTask(void* pdata)
     }
    }
 
-   OSTmrStart(BUTTONIOTmr, &err);
+  OSTmrStart(BUTTONIOTmr, &err);
   if (DEBUG) {
     if (err == OS_ERR_NONE) { //start successful
       printf("BUTTONIOTmr started\n");
     }
    }
+  
+  OSTmrStart(OverloadTmr, &err);
+  if (DEBUG) {
+    if (err == OS_ERR_NONE) { //start successful
+      printf("OverloadTmr started\n");
+    }
+   }
+
 
   /*
    * Creation of Kernel Objects
@@ -895,6 +1010,10 @@ void StartTask(void* pdata)
   SwitchIOSem = OSSemCreate(0);
   ButtonIOSem = OSSemCreate(0);
 
+  WatchdogSem = OSSemCreate(0);
+  OverloadDetectionSem = OSSemCreate(0);
+  ExtraLoadSem = OSSemCreate(0);
+
   // Mailboxes
   Mbox_Throttle = OSMboxCreate((void*) 0); /* Empty Mailbox - Throttle */
   Mbox_Velocity = OSMboxCreate((void*) 0); /* Empty Mailbox - Velocity */
@@ -904,6 +1023,7 @@ void StartTask(void* pdata)
   Mbox_Cruise = OSMboxCreate((void*) 0); /* Empty Mailbox - Cruise */
   Mbox_Gas_pedel = OSMboxCreate((void*) 0); /* Empty Mailbox - gas_pedel */
   Mbox_Top_gear = OSMboxCreate((void*) 0); /* Empty Mailbox - top_gear */
+  Mbox_WatchDog = OSMboxCreate((void*) 0); /* Empty Mailbox - watch dog */
 
   /*
    * Create statistics task
@@ -964,6 +1084,45 @@ void StartTask(void* pdata)
       ButtonIOTask_PRIO,
       ButtonIOTask_PRIO,
       (void *)&ButtonIOTask_Stack[0],
+      TASK_STACKSIZE,
+      (void *) 0,
+      OS_TASK_OPT_STK_CHK);
+
+  err = OSTaskCreateExt(
+      WatchDogTask, // Pointer to task code
+      NULL,        // Pointer to argument that is
+      // passed to task
+      &Watchdog_Stack[TASK_STACKSIZE-1], // Pointer to top
+      // of task stack
+      Watchdog_PRIO,
+      Watchdog_PRIO,
+      (void *)&Watchdog_Stack[0],
+      TASK_STACKSIZE,
+      (void *) 0,
+      OS_TASK_OPT_STK_CHK);
+
+  err = OSTaskCreateExt(
+      OverloadDetectionTask, // Pointer to task code
+      NULL,        // Pointer to argument that is
+      // passed to task
+      &OverloadDetection_Stack[TASK_STACKSIZE-1], // Pointer to top
+      // of task stack
+      OverloadTask_PRIO,
+      OverloadTask_PRIO,
+      (void *)&OverloadDetection_Stack[0],
+      TASK_STACKSIZE,
+      (void *) 0,
+      OS_TASK_OPT_STK_CHK);
+
+  err = OSTaskCreateExt(
+      ExtraLoadTask, // Pointer to task code
+      NULL,        // Pointer to argument that is
+      // passed to task
+      &ExtraLoad_Stack[TASK_STACKSIZE-1], // Pointer to top
+      // of task stack
+      ExtraloadTask_PRIO,
+      ExtraloadTask_PRIO,
+      (void *)&ExtraLoad_Stack[0],
       TASK_STACKSIZE,
       (void *) 0,
       OS_TASK_OPT_STK_CHK);
