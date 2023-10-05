@@ -11,15 +11,15 @@
 
 1. When dealing with message queues does MicroC/OS-II provide a
 
-   (a) non-blocking write?（立即完成）    **yes, OSQPost()**
+   (a) non-blocking write?    **yes, OSQPost()**
 
-   (b) blocking write with timeout?（等待一段时间） **No**
+   (b) blocking write with timeout? **No**
 
-   (c) blocking write?（一直等待） **No**
+   (c) blocking write? **No**
 
    (d) non-blocking read?   **Yes OSQAccept()**
 
-   (e) blocking read with timeout?   Yes, OSQPend()
+   (e) blocking read with timeout?   **Yes, OSQPend()**
 
    (f) blocking read?   **Yes, OSQPend(),  A timeout value of 0 indicates that the task wants to wait** 
 
@@ -33,23 +33,22 @@
 
    Functions: 
 
-   - OSmemCreate()  创建固定大小blocks的储存空间
-   - OSmemGet()  获得固定大小blocks的储存空间
-   - OSMemPut()  释放固定大小blocks的储存空间
-   - OSMemQuery()  获得储存空间的信息
+   - OSmemCreate()  
+   - OSmemGet()  
+   - OSMemPut()  
+   - OSMemQuery() 
 
    Advantages:
 
-   - 时间固定而malloc和free操作时间不确定。
-   - 可以获得固定大小相邻的内存块
-   - 返回超时
-   - 避免内存泄漏，分割
-
+   - faster and with predictable time cost.
+   - can obtain fixed size adjacent memory blocks.
+   - Avoid memory leaks because of fixed size memory block.
+   
 3. The function OSQPend returns a pointer void*.
 
    (a) What is a void*-pointer and how can it be used?
 
-   - 指向一个接收数据的数据类型的地址，将其传入函数可以改变该地址的值。
+   - point to the address with received data, we can transfer the data type we want by a pointer with specific data type.
 
    (b) How can you regenerate the message that has been send using the void*-pointer.
 
@@ -57,83 +56,69 @@
    int* pInt;
    pInt = (int*) OSQPend(myQueue, timeout, &err);
    if (err == OS_NO_ERR) {
-       int receivedValue = *pInt;
+       int receivedValue = *pInt; 
    }
    ```
 
    #### 3 RTOS Tasks
 
-   ##### 3.1**Accessing a Shared Resource: I/O**
+   ##### 3.1 **Accessing a Shared Resource: I/O**
 
    打开TwoTasks.c, 观察现象
 
    - What is the expected output of this program in the first glance?
 
-     - 一开始会输出：
+     ```c
+     // print 
+     Lab 3 - Two Tasks
+     Hello from Task1
+     Hello from Task2
+     // output stack usage
+     Task1 (priority 6) - Used: ; Free: 
+     Task2 (priority 7) - Used: ; Free: 
+     StatisticTask (priority 12) - Used: ; Free: 
+     ```
 
-     - ```c
-       // print 
-       Lab 3 - Two Tasks
-       Hello from Task1
-       Hello from Task2
-       // output stack usage
-       Task1 (priority 6) - Used: ; Free: 
-       Task2 (priority 7) - Used: ; Free: 
-       StatisticTask (priority 12) - Used: ; Free: 
-       ```
+   - The program might not show the desired behavior. Explain why this might happen.
 
-       
-
-   - The program might not show the desired behavior. Explain why this
-
-     might happen.
-
-     - 因为几个task都是无限循环，并且都带有延迟函数，task1具有最高的优先级，所以可能会出先task2打印更加频繁的情况。
+     - task 2 will be interupted by task 1 because of higher priority, and task 2 will excute from a new start.
 
    - What will happen if you take away OSTimeDlyHMSM() statements? Why?
 
-     - 去掉延迟，几个任务都会不断的执行，由于task1 有更高的优先级，可能会一直保持在循环中。
+     - task 1 will excute forever because of highest priority in the loop.
 
-   - Semaphores can help you to get the desired program behavior. What
+   - Semaphores can help you to get the desired program behavior. What are semaphores? How can one declare and create a semaphore in MicroC/OS-II?
 
-     are semaphores? How can one declare and create a semaphore in
-
-     MicroC/OS-II?
-
-     semaphore适用于控制对共享资源的访问和同步任务的工具。
+     It's used for controling access to a shared resource.
 
    - How can a semaphore protect a critical section? Give a code example!
 
      - ```C
-       OS_EVENT *resourceSem = OSSemCreate(1); // 二进制信号量
+       OS_EVENT *resourceSem = OSSemCreate(1); 
        
-       // 任务A
-       OSSemPend(resourceSem, 0, &err); // 等待信号量
-       // 临界区
-       OSSemPost(resourceSem); // 释放信号量
+       // task 1
+       OSSemPend(resourceSem1, 0, &err); // wait signal
+       OSSemPost(resourceSem2); // post signal
        
-       // 任务B
-       OSSemPend(resourceSem, 0, &err); // 等待信号量
-       // 临界区
-       OSSemPost(resourceSem); // 释放信号量
+       // task 2
+       OSSemPend(resourceSem2, 0, &err); // wait signal
+       OSSemPost(resourceSem1); // wait signal
        ```
-
+       
        
 
    - Who is allowed to lock and release semaphores? Can a task release a
 
      semaphore that was locked by another task?
 
-     - 任何任务都可以改变semaphore的值。
+     - every task can change semaphore.
 
    - Explain the mechanisms behind the command OSSemPost() and
 
      OSSemPend()
      
-     - `OSSemPend()`: 任务使用此函数请求或“pend”一个信号量。如果信号量计数大于零，它会减少计数并立即返回。如果计数为零，任务将被阻塞，直到另一个任务或中断发布信号量，或直到发生可选的超时。
-     - `OSSemPost()`: 用于释放或“post”一个信号量。它增加了信号量计数。如果有任务在等待信号量，其中一个（基于优先级）将准备好运行。
-
-   画出示意图。
+     - `OSSemPend()`: wait for a signal, if there is a signal, semephore value will minus 1, or block the task, can set the timeout value.
+     - `OSSemPost()`: post a signal for the task which is ready to excute.
 
    ##### 3.2**Communication by Handshakes**
 
@@ -167,7 +152,7 @@
 
    ##### 3.4 **Context Switch**
 
-   - 自己写一个定时器
+   - 自己写一个定时器。
 
    - 在[Alt10, PER]参考。
    - 修改Handshake.c 来测试时间

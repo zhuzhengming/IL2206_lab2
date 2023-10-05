@@ -511,7 +511,6 @@ void ControlTask(void* pdata)
   //   // If your control algorithm/technique needs them in order to function. 
     
      /* Non-blocking read of mailbox: */
-    // from: control task
 
     /* engine signal from switchIOtask */
     msg = OSMboxPend(Mbox_Engine_to_control, 1, &err); 
@@ -555,6 +554,12 @@ void ControlTask(void* pdata)
     ,CRUISE_CONTROL_status, GAS_PEDAL_status, TOP_GEAR_status);
     }
 
+/*-----------------------------------------------------------------------------------------------------------*/
+/*-----------------------------------------------------------------------------------------------------------*/
+
+    // Control 
+    // if(current_velocity == 0) ENGINE_status = off;
+
     if(ENGINE_status == on){
       // speed up
       if(GAS_PEDAL_status == on){
@@ -577,8 +582,8 @@ void ControlTask(void* pdata)
             PID_control(&PID, current_velocity, target_velocity);
             throttle = (INT8U)(throttle + PID.output);
 
-            if(target_velocity - current_velocity >4 
-            || current_velocity - target_velocity >4) CRUISE_CONTROL_status == off;
+            if(target_velocity - current_velocity > 4 
+            || current_velocity - target_velocity > 4) CRUISE_CONTROL_status == off;
         
         } 
 
@@ -664,6 +669,9 @@ void SwitchIOTask(void* pdata){
       IOWR_ALTERA_AVALON_PIO_DATA(DE2_PIO_REDLED18_BASE,TURN_OFF);
       break;
     }
+
+/*-----------------------------------------------------------------------------------------------------------*/
+/*-----------------------------------------------------------------------------------------------------------*/
 
     // put engine signal into Mbox_engine_vehicle
     err = OSMboxPost(Mbox_Engine_to_vehicle, (void*)&ENGINE_status);
@@ -756,6 +764,9 @@ void ButtonIOTask(void* pdata){
       break;
     }
 
+/*-----------------------------------------------------------------------------------------------------------*/
+/*-----------------------------------------------------------------------------------------------------------*/
+
      // put cruise control signal into Mbox_Cruise
     err = OSMboxPost(Mbox_Cruise, (void*)&CRUISE_CONTROL_status);
     if(MBOX_DEBUG){
@@ -798,6 +809,9 @@ enum watchdog Watchdog_status = feeddog;
       // if(WATCHDOH_DEBUG) printf("watch_dog_msg recieve! \n");
       Watchdog_status = *(enum active*)msg;
     }
+
+/*-----------------------------------------------------------------------------------------------------------*/
+/*-----------------------------------------------------------------------------------------------------------*/
 
     if(Watchdog_status == wait){
       printf("warning: overload! \n");
@@ -843,6 +857,8 @@ INT16U runtime;
 
   while (1)
   {
+
+    // calculate utilization
     SwitchValue = switches_pressed();
     // 0x3f0 : 001111110000
     utilization = (int)(SwitchValue & 0x3f0) >> 4;
@@ -853,6 +869,10 @@ INT16U runtime;
     // add extra load acoording to utilization
     runtime = (INT16U)OVERLOAD_PERIOD * ratio;
 
+/*-----------------------------------------------------------------------------------------------------------*/
+/*-----------------------------------------------------------------------------------------------------------*/
+
+    // add extra load
     start_time = OSTimeGet(); // the current value of the system clock
     do{
         cur_time = OSTimeGet();
